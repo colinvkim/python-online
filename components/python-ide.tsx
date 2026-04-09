@@ -1,12 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import CodeMirror from "@uiw/react-codemirror";
-import { python } from "@codemirror/lang-python";
-import { oneDark } from "@codemirror/theme-one-dark";
-import { EditorView } from "@codemirror/view";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import PythonEditor from "@/components/python-editor";
 import { persistCode, readStoredCode } from "@/lib/storage";
 import {
   INTERRUPT_SIGNAL,
@@ -15,34 +12,6 @@ import {
   type WorkerInboundMessage,
   type WorkerOutboundMessage,
 } from "@/lib/runtime";
-
-const editorTheme = EditorView.theme({
-  "&": {
-    fontSize: "15px",
-    backgroundColor: "#0f172a",
-  },
-  ".cm-content": {
-    padding: "22px 0",
-    caretColor: "#f8fafc",
-  },
-  ".cm-line": {
-    padding: "0 22px",
-  },
-  ".cm-gutters": {
-    backgroundColor: "#0f172a",
-    border: "none",
-    color: "#64748b",
-  },
-  ".cm-activeLineGutter": {
-    backgroundColor: "rgba(56, 189, 248, 0.14)",
-  },
-  ".cm-activeLine": {
-    backgroundColor: "rgba(148, 163, 184, 0.08)",
-  },
-  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-    backgroundColor: "rgba(56, 189, 248, 0.24)",
-  },
-});
 
 const STATUS_LABELS: Record<RuntimeStatus, string> = {
   standby: "Idle",
@@ -59,12 +28,14 @@ function normalizeTerminalText(text: string) {
 }
 
 export default function PythonIde() {
-  const [code, setCode] = useState("");
+  const [initialCode, setInitialCode] = useState("");
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>("standby");
   const [awaitingInput, setAwaitingInput] = useState(false);
   const [supportError, setSupportError] = useState<string | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
 
+  const codeRef = useRef("");
+  const persistTimeoutRef = useRef<number | null>(null);
   const workerRef = useRef<Worker | null>(null);
   const stdinMetaRef = useRef<Int32Array | null>(null);
   const stdinBytesRef = useRef<Uint8Array | null>(null);
@@ -169,7 +140,8 @@ export default function PythonIde() {
 
     const stored = readStoredCode();
     if (stored?.code) {
-      setCode(stored.code);
+      codeRef.current = stored.code;
+      setInitialCode(stored.code);
     }
 
     if (
@@ -185,25 +157,35 @@ export default function PythonIde() {
   }, []);
 
   useEffect(() => {
-    if (!isHydrated) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      persistCode(code, null);
-    }, 300);
-
     return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [code, isHydrated]);
-
-  useEffect(() => {
-    return () => {
+      if (persistTimeoutRef.current !== null) {
+        window.clearTimeout(persistTimeoutRef.current);
+        persistTimeoutRef.current = null;
+      }
       workerRef.current?.terminate();
       workerRef.current = null;
     };
   }, []);
+
+  const handleCodeChange = useCallback(
+    (value: string) => {
+      codeRef.current = value;
+
+      if (!isHydrated) {
+        return;
+      }
+
+      if (persistTimeoutRef.current !== null) {
+        window.clearTimeout(persistTimeoutRef.current);
+      }
+
+      persistTimeoutRef.current = window.setTimeout(() => {
+        persistCode(value, null);
+        persistTimeoutRef.current = null;
+      }, 300);
+    },
+    [isHydrated],
+  );
 
   useEffect(() => {
     if (!supportError || hasLoggedSupportErrorRef.current || !terminalRef.current) {
@@ -476,7 +458,7 @@ export default function PythonIde() {
 
     const message: WorkerInboundMessage = {
       type: "run",
-      code,
+      code: codeRef.current,
       requestId,
     };
 
@@ -523,7 +505,7 @@ export default function PythonIde() {
 
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [code, runtimeStatus, supportError]);
+  }, [runtimeStatus, supportError]);
 
   return (
     <main className="ide-shell">
@@ -561,28 +543,9 @@ export default function PythonIde() {
 
         <section className="ide-workspace">
           <article className="pane pane--editor">
-            <CodeMirror
-              value={code}
-              height="100%"
-              theme={oneDark}
-              basicSetup={{
-                lineNumbers: true,
-                foldGutter: false,
-                dropCursor: false,
-                highlightActiveLineGutter: true,
-                highlightSpecialChars: false,
-              }}
-              extensions={[
-                python(),
-                EditorView.lineWrapping,
-                editorTheme,
-                EditorView.theme({
-                  "&": {
-                    height: "100%",
-                  },
-                }),
-              ]}
-              onChange={(value) => setCode(value)}
+            <PythonEditor
+              initialCode={initialCode}
+              onCodeChange={handleCodeChange}
             />
           </article>
 
