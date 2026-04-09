@@ -99,7 +99,7 @@ function PythonEditorComponent({
       extensions={[
         python(),
         editorTheme,
-        placeholder("Type Python here, then press Run"),
+        placeholder("Type Python code here, then press Run"),
         EditorView.contentAttributes.of({
           autocapitalize: "off",
           autocomplete: "off",
