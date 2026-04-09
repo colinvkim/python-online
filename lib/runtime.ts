@@ -1,4 +1,5 @@
 export const STDIN_CAPACITY_BYTES = 8192;
+export const INTERRUPT_SIGNAL = 2;
 
 export type RuntimeStatus =
   | "standby"
@@ -13,10 +14,15 @@ export type WorkerInboundMessage =
   | {
       type: "init";
       stdinBuffer: SharedArrayBuffer;
+      interruptBuffer: SharedArrayBuffer;
     }
   | {
       type: "run";
       code: string;
+      requestId: string;
+    }
+  | {
+      type: "stop";
       requestId: string;
     };
 
@@ -47,6 +53,10 @@ export type WorkerOutboundMessage =
     }
   | {
       type: "success";
+      requestId: string;
+    }
+  | {
+      type: "interrupted";
       requestId: string;
     }
   | {

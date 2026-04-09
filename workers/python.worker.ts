@@ -1,10 +1,16 @@
 import { loadPyodide, version as pyodideVersion } from "pyodide";
 import type { PyodideInterface } from "pyodide";
-import type { WorkerInboundMessage, WorkerOutboundMessage } from "@/lib/runtime";
+import {
+  INTERRUPT_SIGNAL,
+  type WorkerInboundMessage,
+  type WorkerOutboundMessage,
+} from "@/lib/runtime";
 
 let pyodideReadyPromise: Promise<PyodideInterface> | null = null;
+let pyodideInstance: PyodideInterface | null = null;
 let stdinMeta: Int32Array | null = null;
 let stdinBytes: Uint8Array | null = null;
+let interruptBuffer: Int32Array | null = null;
 let pendingBytes: Uint8Array | null = null;
 let pendingOffset = 0;
 let activeRequestId: string | null = null;
@@ -29,7 +35,10 @@ function readFromSharedStdin() {
   const { meta, bytes } = ensureStdinReady();
 
   while (Atomics.load(meta, 0) === 0) {
-    Atomics.wait(meta, 0, 0, 100);
+    const state = Atomics.wait(meta, 0, 0, 100);
+    if (state === "timed-out") {
+      pyodideInstance?.checkInterrupt();
+    }
   }
 
   const length = Atomics.load(meta, 1);
@@ -77,6 +86,12 @@ async function ensurePyodide() {
       indexURL: `https://cdn.jsdelivr.net/pyodide/v${pyodideVersion}/full/`,
     })
       .then((instance) => {
+        pyodideInstance = instance;
+
+        if (interruptBuffer) {
+          instance.setInterruptBuffer(interruptBuffer);
+        }
+
         instance.setStdout({
           raw: (charCode) => {
             if (!activeRequestId) {
@@ -126,6 +141,9 @@ async function runCode(code: string, requestId: string) {
   pendingBytes = null;
   pendingOffset = 0;
   awaitingInput = false;
+  if (interruptBuffer) {
+    Atomics.store(interruptBuffer, 0, 0);
+  }
   let pyodide: PyodideInterface | null = null;
 
   try {
@@ -150,17 +168,27 @@ exec(compiled, globals_dict, globals_dict)
     const message =
       error instanceof Error ? error.message : "Unknown Python runtime error.";
 
-    post({
-      type: "error",
-      requestId,
-      error: message,
-    });
+    if (message.includes("KeyboardInterrupt")) {
+      post({
+        type: "interrupted",
+        requestId,
+      });
+    } else {
+      post({
+        type: "error",
+        requestId,
+        error: message,
+      });
+    }
   } finally {
     pyodide?.globals.delete("__user_code");
     activeRequestId = null;
     pendingBytes = null;
     pendingOffset = 0;
     awaitingInput = false;
+    if (interruptBuffer) {
+      Atomics.store(interruptBuffer, 0, 0);
+    }
   }
 }
 
@@ -170,10 +198,17 @@ self.onmessage = (event: MessageEvent<WorkerInboundMessage>) => {
   if (message.type === "init") {
     stdinMeta = new Int32Array(message.stdinBuffer, 0, 2);
     stdinBytes = new Uint8Array(message.stdinBuffer, 8);
+    interruptBuffer = new Int32Array(message.interruptBuffer);
+    pyodideInstance?.setInterruptBuffer(interruptBuffer);
     return;
   }
 
   if (message.type === "run") {
     void runCode(message.code, message.requestId);
+    return;
+  }
+
+  if (message.type === "stop" && activeRequestId === message.requestId && interruptBuffer) {
+    Atomics.store(interruptBuffer, 0, INTERRUPT_SIGNAL);
   }
 };

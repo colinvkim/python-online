@@ -10,6 +10,7 @@ import { Terminal } from "@xterm/xterm";
 import { DEFAULT_TEMPLATE } from "@/lib/templates";
 import { clearStoredCode, persistCode, readStoredCode } from "@/lib/storage";
 import {
+  INTERRUPT_SIGNAL,
   STDIN_CAPACITY_BYTES,
   type RuntimeStatus,
   type WorkerInboundMessage,
@@ -68,6 +69,7 @@ export default function PythonIde() {
   const workerRef = useRef<Worker | null>(null);
   const stdinMetaRef = useRef<Int32Array | null>(null);
   const stdinBytesRef = useRef<Uint8Array | null>(null);
+  const interruptBufferRef = useRef<Int32Array | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const requestSequenceRef = useRef(0);
 
@@ -76,6 +78,7 @@ export default function PythonIde() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const awaitingInputRef = useRef(false);
+  const runtimeStatusRef = useRef<RuntimeStatus>("standby");
   const currentInputRef = useRef("");
   const hasLoggedSupportErrorRef = useRef(false);
 
@@ -94,6 +97,10 @@ export default function PythonIde() {
       }
     }
   }, [awaitingInput]);
+
+  useEffect(() => {
+    runtimeStatusRef.current = runtimeStatus;
+  }, [runtimeStatus]);
 
   useEffect(() => {
     if (!terminalHostRef.current || terminalRef.current) {
@@ -135,38 +142,7 @@ export default function PythonIde() {
     fitAddonRef.current = fitAddon;
 
     const disposable = terminal.onData((data) => {
-      if (!awaitingInputRef.current) {
-        return;
-      }
-
-      if (data === "\u0003") {
-        return;
-      }
-
-      if (data === "\r") {
-        const input = currentInputRef.current;
-        terminal.write("\r\n");
-        currentInputRef.current = "";
-        submitInput(input);
-        return;
-      }
-
-      if (data === "\u007f") {
-        if (currentInputRef.current.length === 0) {
-          return;
-        }
-
-        currentInputRef.current = currentInputRef.current.slice(0, -1);
-        terminal.write("\b \b");
-        return;
-      }
-
-      if (data < " " || data === "\u007f") {
-        return;
-      }
-
-      currentInputRef.current += data;
-      terminal.write(data);
+      handleTerminalData(data);
     });
 
     resizeObserverRef.current = new ResizeObserver(() => {
@@ -269,6 +245,12 @@ export default function PythonIde() {
     return shared;
   }
 
+  function setUpInterruptBuffer() {
+    const shared = new SharedArrayBuffer(4);
+    interruptBufferRef.current = new Int32Array(shared);
+    return shared;
+  }
+
   function submitInput(input: string) {
     const meta = stdinMetaRef.current;
     const bytes = stdinBytesRef.current;
@@ -330,6 +312,13 @@ export default function PythonIde() {
         setRuntimeStatus("ready");
         activeRequestIdRef.current = null;
         break;
+      case "interrupted":
+        setAwaitingInput(false);
+        currentInputRef.current = "";
+        writelnTerminal("^C");
+        setRuntimeStatus("stopped");
+        activeRequestIdRef.current = null;
+        break;
       case "error":
         setAwaitingInput(false);
         writelnTerminal(message.error);
@@ -363,9 +352,11 @@ export default function PythonIde() {
     });
 
     const stdinBuffer = setUpStdinBuffer();
+    const interruptBuffer = setUpInterruptBuffer();
     const initMessage: WorkerInboundMessage = {
       type: "init",
       stdinBuffer,
+      interruptBuffer,
     };
 
     worker.postMessage(initMessage);
@@ -378,6 +369,79 @@ export default function PythonIde() {
     workerRef.current = null;
     stdinMetaRef.current = null;
     stdinBytesRef.current = null;
+    interruptBufferRef.current = null;
+  }
+
+  function requestInterrupt() {
+    const requestId = activeRequestIdRef.current;
+    if (!requestId || !workerRef.current) {
+      return false;
+    }
+
+    if (runtimeStatusRef.current === "loading") {
+      return false;
+    }
+
+    const interruptBuffer = interruptBufferRef.current;
+    if (!interruptBuffer) {
+      return false;
+    }
+
+    Atomics.store(interruptBuffer, 0, INTERRUPT_SIGNAL);
+    const message: WorkerInboundMessage = {
+      type: "stop",
+      requestId,
+    };
+    workerRef.current.postMessage(message);
+    return true;
+  }
+
+  function handleTerminalData(data: string) {
+    if (data.includes("\u0003")) {
+      handleStop();
+      return;
+    }
+
+    if (!awaitingInputRef.current) {
+      return;
+    }
+
+    for (const char of Array.from(data)) {
+      if (char === "\r" || char === "\n") {
+        const input = currentInputRef.current;
+        terminalRef.current?.write("\r\n");
+        currentInputRef.current = "";
+        submitInput(input);
+        break;
+      }
+
+      if (char === "\u007f") {
+        if (currentInputRef.current.length === 0) {
+          continue;
+        }
+
+        currentInputRef.current = currentInputRef.current.slice(0, -1);
+        terminalRef.current?.write("\b \b");
+        continue;
+      }
+
+      if (char === "\u0015") {
+        while (currentInputRef.current.length > 0) {
+          currentInputRef.current = currentInputRef.current.slice(0, -1);
+          terminalRef.current?.write("\b \b");
+        }
+        continue;
+      }
+
+      if (char === "\u001b") {
+        continue;
+      }
+
+      if (char === "\t" || char >= " ") {
+        currentInputRef.current += char;
+        terminalRef.current?.write(char);
+      }
+    }
   }
 
   async function handleRun() {
@@ -420,12 +484,15 @@ export default function PythonIde() {
       return;
     }
 
-    resetWorker();
-    currentInputRef.current = "";
-    setAwaitingInput(false);
-    activeRequestIdRef.current = null;
-    setRuntimeStatus("stopped");
-    writelnTerminal("^C");
+    const interrupted = requestInterrupt();
+    if (!interrupted) {
+      resetWorker();
+      currentInputRef.current = "";
+      setAwaitingInput(false);
+      activeRequestIdRef.current = null;
+      setRuntimeStatus("stopped");
+      writelnTerminal("^C");
+    }
     focusTerminal();
   }
 
