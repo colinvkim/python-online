@@ -5,6 +5,8 @@ import CodeMirror from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView } from "@codemirror/view";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
 import { DEFAULT_TEMPLATE } from "@/lib/templates";
 import { clearStoredCode, persistCode, readStoredCode } from "@/lib/storage";
 import {
@@ -42,14 +44,6 @@ const editorTheme = EditorView.theme({
   },
 });
 
-type ConsoleEntryTone = "stdout" | "stderr" | "stdin";
-
-type ConsoleEntry = {
-  id: string;
-  tone: ConsoleEntryTone;
-  text: string;
-};
-
 const STATUS_LABELS: Record<RuntimeStatus, string> = {
   standby: "Idle",
   loading: "Loading",
@@ -60,12 +54,14 @@ const STATUS_LABELS: Record<RuntimeStatus, string> = {
   error: "Error",
 };
 
+function normalizeTerminalText(text: string) {
+  return text.replace(/\r?\n/g, "\r\n");
+}
+
 export default function PythonIde() {
   const [code, setCode] = useState(DEFAULT_TEMPLATE.code);
-  const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>("standby");
   const [awaitingInput, setAwaitingInput] = useState(false);
-  const [stdinValue, setStdinValue] = useState("");
   const [supportError, setSupportError] = useState<string | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
 
@@ -74,14 +70,124 @@ export default function PythonIde() {
   const stdinBytesRef = useRef<Uint8Array | null>(null);
   const activeRequestIdRef = useRef<string | null>(null);
   const requestSequenceRef = useRef(0);
-  const terminalScrollRef = useRef<HTMLDivElement | null>(null);
-  const terminalInputRef = useRef<HTMLInputElement | null>(null);
+
+  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const awaitingInputRef = useRef(false);
+  const currentInputRef = useRef("");
   const hasLoggedSupportErrorRef = useRef(false);
 
   const statusLabel = useMemo(
     () => STATUS_LABELS[runtimeStatus] ?? "Idle",
     [runtimeStatus],
   );
+
+  useEffect(() => {
+    awaitingInputRef.current = awaitingInput;
+
+    if (terminalRef.current) {
+      terminalRef.current.options.cursorBlink = awaitingInput;
+      if (awaitingInput) {
+        terminalRef.current.focus();
+      }
+    }
+  }, [awaitingInput]);
+
+  useEffect(() => {
+    if (!terminalHostRef.current || terminalRef.current) {
+      return;
+    }
+
+    const terminal = new Terminal({
+      allowTransparency: true,
+      convertEol: false,
+      cursorBlink: false,
+      cursorStyle: "bar",
+      fontFamily: '"JetBrains Mono", "SF Mono", "IBM Plex Mono", monospace',
+      fontSize: 14,
+      lineHeight: 1.5,
+      letterSpacing: 0.2,
+      theme: {
+        background: "#02060d",
+        foreground: "#d5e6f7",
+        cursor: "#8ce3b8",
+        cursorAccent: "#02060d",
+        brightBlack: "#475569",
+        black: "#0f172a",
+        red: "#f87171",
+        green: "#8ce3b8",
+        yellow: "#fbbf24",
+        blue: "#56c7ff",
+        magenta: "#c084fc",
+        cyan: "#67e8f9",
+        white: "#e2e8f0",
+      },
+    });
+    const fitAddon = new FitAddon();
+
+    terminal.loadAddon(fitAddon);
+    terminal.open(terminalHostRef.current);
+    fitAddon.fit();
+    terminal.focus();
+    terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+
+    const disposable = terminal.onData((data) => {
+      if (!awaitingInputRef.current) {
+        return;
+      }
+
+      if (data === "\u0003") {
+        return;
+      }
+
+      if (data === "\r") {
+        const input = currentInputRef.current;
+        terminal.write("\r\n");
+        currentInputRef.current = "";
+        submitInput(input);
+        return;
+      }
+
+      if (data === "\u007f") {
+        if (currentInputRef.current.length === 0) {
+          return;
+        }
+
+        currentInputRef.current = currentInputRef.current.slice(0, -1);
+        terminal.write("\b \b");
+        return;
+      }
+
+      if (data < " " || data === "\u007f") {
+        return;
+      }
+
+      currentInputRef.current += data;
+      terminal.write(data);
+    });
+
+    resizeObserverRef.current = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+    resizeObserverRef.current.observe(terminalHostRef.current);
+
+    if (supportError && !hasLoggedSupportErrorRef.current) {
+      hasLoggedSupportErrorRef.current = true;
+      terminal.writeln(supportError);
+    }
+
+    return () => {
+      disposable.dispose();
+      resizeObserverRef.current?.disconnect();
+      resizeObserverRef.current = null;
+      terminal.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, [supportError]);
 
   useEffect(() => {
     setIsHydrated(true);
@@ -119,46 +225,41 @@ export default function PythonIde() {
   }, []);
 
   useEffect(() => {
-    terminalScrollRef.current?.scrollTo({
-      top: terminalScrollRef.current.scrollHeight,
-    });
-  }, [consoleEntries, stdinValue, awaitingInput]);
-
-  useEffect(() => {
-    if (awaitingInput) {
-      terminalInputRef.current?.focus();
-      terminalInputRef.current?.select();
-    }
-  }, [awaitingInput]);
-
-  useEffect(() => {
-    if (!supportError || hasLoggedSupportErrorRef.current) {
+    if (!supportError || hasLoggedSupportErrorRef.current || !terminalRef.current) {
       return;
     }
 
     hasLoggedSupportErrorRef.current = true;
-    setConsoleEntries([
-      {
-        id: "support-error",
-        tone: "stderr",
-        text: `${supportError}\n`,
-      },
-    ]);
+    terminalRef.current.writeln(supportError);
   }, [supportError]);
 
-  function appendConsoleEntry(tone: ConsoleEntryTone, text: string) {
-    setConsoleEntries((current) => [
-      ...current,
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        tone,
-        text,
-      },
-    ]);
+  function focusTerminal() {
+    terminalRef.current?.focus();
   }
 
-  function clearConsole() {
-    setConsoleEntries([]);
+  function fitTerminal() {
+    fitAddonRef.current?.fit();
+  }
+
+  function resetTerminal() {
+    currentInputRef.current = "";
+
+    if (terminalRef.current) {
+      terminalRef.current.reset();
+      fitTerminal();
+    }
+  }
+
+  function writeTerminal(text: string) {
+    if (!terminalRef.current) {
+      return;
+    }
+
+    terminalRef.current.write(normalizeTerminalText(text));
+  }
+
+  function writelnTerminal(text: string) {
+    writeTerminal(`${text}\n`);
   }
 
   function setUpStdinBuffer() {
@@ -166,6 +267,33 @@ export default function PythonIde() {
     stdinMetaRef.current = new Int32Array(shared, 0, 2);
     stdinBytesRef.current = new Uint8Array(shared, 8);
     return shared;
+  }
+
+  function submitInput(input: string) {
+    const meta = stdinMetaRef.current;
+    const bytes = stdinBytesRef.current;
+
+    if (!meta || !bytes) {
+      writelnTerminal("stdin channel is not ready.");
+      return;
+    }
+
+    const encoded = new TextEncoder().encode(`${input}\n`);
+    if (encoded.length > STDIN_CAPACITY_BYTES) {
+      writelnTerminal(
+        `stdin is too large. Limit input to ${STDIN_CAPACITY_BYTES - 1} bytes.`,
+      );
+      return;
+    }
+
+    bytes.fill(0);
+    bytes.set(encoded);
+    Atomics.store(meta, 1, encoded.length);
+    Atomics.store(meta, 0, 1);
+    Atomics.notify(meta, 0, 1);
+
+    setAwaitingInput(false);
+    setRuntimeStatus("running");
   }
 
   function handleWorkerMessage(event: MessageEvent<WorkerOutboundMessage>) {
@@ -186,14 +314,16 @@ export default function PythonIde() {
         setRuntimeStatus("running");
         break;
       case "stdout":
-        appendConsoleEntry("stdout", message.chunk);
+        writeTerminal(message.chunk);
         break;
       case "stderr":
-        appendConsoleEntry("stderr", message.chunk);
+        writeTerminal(message.chunk);
         break;
       case "input_request":
+        currentInputRef.current = "";
         setAwaitingInput(true);
         setRuntimeStatus("waiting-input");
+        focusTerminal();
         break;
       case "success":
         setAwaitingInput(false);
@@ -202,7 +332,7 @@ export default function PythonIde() {
         break;
       case "error":
         setAwaitingInput(false);
-        appendConsoleEntry("stderr", `${message.error}\n`);
+        writelnTerminal(message.error);
         setRuntimeStatus("error");
         activeRequestIdRef.current = null;
         break;
@@ -227,8 +357,9 @@ export default function PythonIde() {
 
     worker.addEventListener("message", handleWorkerMessage);
     worker.addEventListener("error", (event) => {
-      appendConsoleEntry("stderr", `${event.message}\n`);
+      writelnTerminal(event.message);
       setRuntimeStatus("error");
+      activeRequestIdRef.current = null;
     });
 
     const stdinBuffer = setUpStdinBuffer();
@@ -261,7 +392,7 @@ export default function PythonIde() {
     const worker = ensureWorker();
     if (!worker) {
       if (supportError) {
-        appendConsoleEntry("stderr", `${supportError}\n`);
+        writelnTerminal(supportError);
       }
       return;
     }
@@ -269,9 +400,9 @@ export default function PythonIde() {
     requestSequenceRef.current += 1;
     const requestId = `run-${requestSequenceRef.current}`;
     activeRequestIdRef.current = requestId;
+    currentInputRef.current = "";
     setAwaitingInput(false);
-    setStdinValue("");
-    clearConsole();
+    resetTerminal();
     setRuntimeStatus("loading");
 
     const message: WorkerInboundMessage = {
@@ -281,6 +412,7 @@ export default function PythonIde() {
     };
 
     worker.postMessage(message);
+    focusTerminal();
   }
 
   function handleStop() {
@@ -289,53 +421,23 @@ export default function PythonIde() {
     }
 
     resetWorker();
+    currentInputRef.current = "";
     setAwaitingInput(false);
-    setStdinValue("");
     activeRequestIdRef.current = null;
     setRuntimeStatus("stopped");
-    appendConsoleEntry("stderr", "^C\n");
+    writelnTerminal("^C");
+    focusTerminal();
   }
 
   function handleReset() {
     clearStoredCode();
     setCode(DEFAULT_TEMPLATE.code);
+    currentInputRef.current = "";
     setAwaitingInput(false);
-    setStdinValue("");
     setRuntimeStatus("standby");
     resetWorker();
-    clearConsole();
-  }
-
-  function handleSubmitInput(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const meta = stdinMetaRef.current;
-    const bytes = stdinBytesRef.current;
-
-    if (!meta || !bytes) {
-      appendConsoleEntry("stderr", "stdin channel is not ready.\n");
-      return;
-    }
-
-    const encoded = new TextEncoder().encode(`${stdinValue}\n`);
-    if (encoded.length > STDIN_CAPACITY_BYTES) {
-      appendConsoleEntry(
-        "stderr",
-        `stdin is too large. Limit input to ${STDIN_CAPACITY_BYTES - 1} bytes.\n`,
-      );
-      return;
-    }
-
-    bytes.fill(0);
-    bytes.set(encoded);
-    Atomics.store(meta, 1, encoded.length);
-    Atomics.store(meta, 0, 1);
-    Atomics.notify(meta, 0, 1);
-
-    appendConsoleEntry("stdin", `› ${stdinValue}\n`);
-    setStdinValue("");
-    setAwaitingInput(false);
-    setRuntimeStatus("running");
+    resetTerminal();
+    focusTerminal();
   }
 
   useEffect(() => {
@@ -343,12 +445,24 @@ export default function PythonIde() {
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
         event.preventDefault();
         void handleRun();
+        return;
+      }
+
+      if (event.ctrlKey && event.key.toLowerCase() === "c") {
+        if (
+          runtimeStatus === "running" ||
+          runtimeStatus === "waiting-input" ||
+          runtimeStatus === "loading"
+        ) {
+          event.preventDefault();
+          handleStop();
+        }
       }
     }
 
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [code, supportError]);
+  }, [code, runtimeStatus, supportError]);
 
   return (
     <main className="ide-shell">
@@ -372,7 +486,7 @@ export default function PythonIde() {
               type="button"
               className="chrome-button"
               onClick={handleStop}
-              disabled={!workerRef.current || runtimeStatus === "loading"}
+              disabled={!workerRef.current || runtimeStatus === "standby"}
             >
               Stop
             </button>
@@ -418,41 +532,8 @@ export default function PythonIde() {
             />
           </article>
 
-          <article
-            className="pane pane--terminal"
-            onClick={() => terminalInputRef.current?.focus()}
-          >
-            <div ref={terminalScrollRef} className="terminal-scroll">
-              {consoleEntries.length === 0 ? null : (
-                <div className="terminal-output" aria-live="polite">
-                  {consoleEntries.map((entry) => (
-                    <span
-                      key={entry.id}
-                      className={`terminal-chunk terminal-chunk--${entry.tone}`}
-                    >
-                      {entry.text}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <form className="terminal-prompt" onSubmit={handleSubmitInput}>
-              <span className="terminal-prompt__caret" aria-hidden="true">
-                {awaitingInput ? "›" : ""}
-              </span>
-              <input
-                ref={terminalInputRef}
-                value={stdinValue}
-                onChange={(event) => setStdinValue(event.target.value)}
-                disabled={!awaitingInput}
-                autoComplete="off"
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                aria-label="Console input"
-              />
-            </form>
+          <article className="pane pane--terminal" onClick={focusTerminal}>
+            <div ref={terminalHostRef} className="terminal-host" />
           </article>
         </section>
       </section>
