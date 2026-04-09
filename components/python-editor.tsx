@@ -4,7 +4,7 @@ import { memo, useEffect, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
 import { oneDark } from "@codemirror/theme-one-dark";
-import { EditorView } from "@codemirror/view";
+import { EditorView, placeholder } from "@codemirror/view";
 
 const editorTheme = EditorView.theme({
   "&": {
@@ -39,6 +39,10 @@ const editorTheme = EditorView.theme({
   },
   ".cm-cursor": {
     borderLeftWidth: "2px",
+  },
+  ".cm-placeholder": {
+    paddingLeft: "16px",
+    color: "rgba(148, 163, 184, 0.56)",
   },
   ".cm-scroller": {
     overflow: "auto",
@@ -87,12 +91,15 @@ function PythonEditorComponent({
         highlightActiveLineGutter: true,
         highlightSpecialChars: false,
         bracketMatching: true,
-        closeBrackets: true,
-        indentOnInput: true,
+        closeBrackets: false,
+        indentOnInput: false,
+        autocompletion: false,
+        completionKeymap: false,
       }}
       extensions={[
         python(),
         editorTheme,
+        placeholder("Type Python here, then press Run"),
         EditorView.contentAttributes.of({
           autocapitalize: "off",
           autocomplete: "off",
