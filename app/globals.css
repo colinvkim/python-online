@@ -223,8 +223,18 @@ button:disabled {
 }
 
 .pane--editor .cm-scroller {
-  overflow: auto !important;
+  overflow-x: auto !important;
+  overflow-y: auto !important;
   -webkit-overflow-scrolling: touch;
+}
+
+.pane--editor .cm-content,
+.pane--editor .cm-line {
+  width: max-content;
+}
+
+.pane--editor .cm-gutters {
+  flex: 0 0 auto;
 }
 
 .terminal-host {
@@ -306,6 +316,10 @@ button:disabled {
   .chrome-button {
     flex: 1 1 0;
     min-width: 0;
+    padding: 0 12px;
+  }
+
+  .pane--editor .cm-line {
     padding: 0 12px;
   }
 

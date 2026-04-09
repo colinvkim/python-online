@@ -14,15 +14,17 @@ const editorTheme = EditorView.theme({
     backgroundColor: "#0b1422",
   },
   ".cm-content": {
-    padding: "24px 0 32px",
+    padding: "18px 0 24px",
     caretColor: "#f8fafc",
+    minWidth: "max-content",
+    tabSize: "2",
   },
   ".cm-line": {
-    padding: "0 24px",
+    padding: "0 16px",
   },
   ".cm-gutters": {
-    minWidth: "52px",
-    paddingRight: "8px",
+    minWidth: "40px",
+    paddingRight: "4px",
     backgroundColor: "#0b1422",
     border: "none",
     color: "#64748b",
@@ -41,6 +43,7 @@ const editorTheme = EditorView.theme({
   },
   ".cm-scroller": {
     overflow: "auto",
+    overscrollBehavior: "contain",
     WebkitOverflowScrolling: "touch",
   },
 });
