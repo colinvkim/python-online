@@ -56,6 +56,10 @@ export default function PythonIde() {
     () => STATUS_LABELS[runtimeStatus] ?? "Idle",
     [runtimeStatus],
   );
+  const isProgramActive =
+    runtimeStatus === "loading" ||
+    runtimeStatus === "running" ||
+    runtimeStatus === "waiting-input";
 
   useEffect(() => {
     awaitingInputRef.current = awaitingInput;
@@ -514,24 +518,15 @@ export default function PythonIde() {
           <div className="ide-toolbar__actions">
             <button
               type="button"
-              className="chrome-button chrome-button--primary"
-              onClick={() => void handleRun()}
-              disabled={
-                Boolean(supportError) ||
-                runtimeStatus === "loading" ||
-                runtimeStatus === "running" ||
-                runtimeStatus === "waiting-input"
-              }
+              className={`chrome-button ${
+                isProgramActive
+                  ? "chrome-button--danger"
+                  : "chrome-button--primary"
+              }`}
+              onClick={isProgramActive ? handleStop : () => void handleRun()}
+              disabled={Boolean(supportError) && !isProgramActive}
             >
-              Run
-            </button>
-            <button
-              type="button"
-              className="chrome-button"
-              onClick={handleStop}
-              disabled={!workerRef.current || runtimeStatus === "standby"}
-            >
-              Stop
+              {isProgramActive ? "Stop" : "Run"}
             </button>
           </div>
 
