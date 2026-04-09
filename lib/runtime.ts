@@ -17,6 +17,9 @@ export type WorkerInboundMessage =
       interruptBuffer: SharedArrayBuffer;
     }
   | {
+      type: "warm";
+    }
+  | {
       type: "run";
       code: string;
       requestId: string;

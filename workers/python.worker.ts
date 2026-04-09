@@ -79,9 +79,14 @@ function readStdin(buffer: Uint8Array) {
   return count;
 }
 
-async function ensurePyodide() {
+async function ensurePyodide(options?: { silent?: boolean }) {
+  const silent = options?.silent ?? false;
+
   if (!pyodideReadyPromise) {
-    post({ type: "loading" });
+    if (!silent) {
+      post({ type: "loading" });
+    }
+
     pyodideReadyPromise = loadPyodide({
       indexURL: `https://cdn.jsdelivr.net/pyodide/v${pyodideVersion}/full/`,
     })
@@ -124,7 +129,9 @@ async function ensurePyodide() {
           read: readStdin,
         });
 
-        post({ type: "ready" });
+        if (!silent) {
+          post({ type: "ready" });
+        }
         return instance;
       })
       .catch((error) => {
@@ -205,6 +212,11 @@ self.onmessage = (event: MessageEvent<WorkerInboundMessage>) => {
 
   if (message.type === "run") {
     void runCode(message.code, message.requestId);
+    return;
+  }
+
+  if (message.type === "warm") {
+    void ensurePyodide({ silent: true });
     return;
   }
 

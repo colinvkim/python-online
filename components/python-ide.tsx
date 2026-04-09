@@ -47,6 +47,7 @@ export default function PythonIde() {
   const currentInputRef = useRef("");
   const hasLoggedSupportErrorRef = useRef(false);
   const suppressPrimaryClickRef = useRef(false);
+  const prewarmRequestedRef = useRef(false);
 
   const isProgramActive =
     runtimeStatus === "loading" ||
@@ -173,6 +174,23 @@ export default function PythonIde() {
     };
   }, []);
 
+  const prewarmWorker = useCallback(() => {
+    if (supportError || prewarmRequestedRef.current) {
+      return;
+    }
+
+    const worker = ensureWorker();
+    if (!worker) {
+      return;
+    }
+
+    prewarmRequestedRef.current = true;
+    const message: WorkerInboundMessage = {
+      type: "warm",
+    };
+    worker.postMessage(message);
+  }, [supportError]);
+
   const handleCodeChange = useCallback(
     (value: string) => {
       codeRef.current = value;
@@ -197,6 +215,55 @@ export default function PythonIde() {
     hasLoggedSupportErrorRef.current = true;
     terminalRef.current.writeln(supportError);
   }, [supportError]);
+
+  useEffect(() => {
+    if (supportError) {
+      return;
+    }
+
+    let timeoutId: number | null = null;
+    let idleId: number | null = null;
+    const requestIdle = window.requestIdleCallback?.bind(window);
+    const cancelIdle = window.cancelIdleCallback?.bind(window);
+
+    const warm = () => {
+      prewarmWorker();
+      removeListeners();
+    };
+
+    const removeListeners = () => {
+      window.removeEventListener("pointerdown", warm);
+      window.removeEventListener("keydown", warm);
+      window.removeEventListener("touchstart", warm);
+    };
+
+    window.addEventListener("pointerdown", warm, { once: true, passive: true });
+    window.addEventListener("keydown", warm, { once: true });
+    window.addEventListener("touchstart", warm, { once: true, passive: true });
+
+    if (requestIdle) {
+      idleId = requestIdle(
+        () => {
+          warm();
+        },
+        { timeout: 2000 },
+      );
+    } else {
+      timeoutId = window.setTimeout(warm, 1500);
+    }
+
+    return () => {
+      removeListeners();
+
+      if (idleId !== null && cancelIdle) {
+        cancelIdle(idleId);
+      }
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [prewarmWorker, supportError]);
 
   function focusTerminal() {
     terminalRef.current?.focus();
