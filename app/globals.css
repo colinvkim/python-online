@@ -191,6 +191,7 @@ button:disabled {
 
 .pane {
   display: flex;
+  min-width: 0;
   min-height: 0;
   overflow: hidden;
 }
@@ -214,15 +215,20 @@ button:disabled {
 
 .pane--editor > * {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
+  width: 100%;
 }
 
 .pane--editor .cm-editor,
 .pane--editor .cm-scroller {
+  min-width: 0;
   min-height: 0;
 }
 
 .pane--editor .cm-scroller {
+  width: 100%;
+  max-width: 100%;
   overflow-x: auto !important;
   overflow-y: auto !important;
   touch-action: pan-x pan-y;
